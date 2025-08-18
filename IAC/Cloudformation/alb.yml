@@ -1,1 +1,15 @@
+Media1Rule:
+  Type: AWS::ElasticLoadBalancingV2::ListenerRule
+  Properties:
+    ListenerArn: !Ref HttpsListenerArn
+    Priority: 10
+    Conditions:
+      - Field: path-pattern
+        Values: ["/media/1/*"]
+    Actions:
+      - Type: forward
+        ForwardConfig:
+          TargetGroups:
+            - TargetGroupArn: !Ref MediaTg1Arn
+              Weight: 1
 
