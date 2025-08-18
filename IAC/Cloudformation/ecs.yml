@@ -1,1 +1,251 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Media Services - ECS (Fargate) Cluster, Task Definition, and Service"
+
+Parameters:
+  ProjectName:
+    Type: String
+    Description: Short project name (used in resource names), e.g., media
+  EnvironmentName:
+    Type: String
+    AllowedValues: [dev, stg, prod]
+    Description: Environment (dev|stg|prod)
+  ClusterName:
+    Type: String
+    Default: media-cluster
+    Description: ECS Cluster name
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC for ECS tasks
+  PrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Private subnets for ECS tasks (comma-separated)
+  TargetGroupArn:
+    Type: String
+    Description: ARN of the ALB Target Group for the media service
+  ALBSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Security Group ID attached to the public ALB (ingress source)
+  TaskImage:
+    Type: String
+    Description: ECR image URI, e.g., 123456789012.dkr.ecr.us-east-1.amazonaws.com/media:latest
+  ContainerPort:
+    Type: Number
+    Default: 4001
+    Description: Container port for WebSocket server
+  DesiredCount:
+    Type: Number
+    Default: 3
+    MinValue: 1
+    Description: ECS service desired count
+  CpuUnits:
+    Type: String
+    Default: "512"
+    AllowedValues: ["256", "512", "1024", "2048", "4096"]
+    Description: Fargate CPU (units)
+  MemoryMiB:
+    Type: String
+    Default: "1024"
+    AllowedValues: ["512", "1024", "2048", "3072", "4096", "5120", "6144", "8192", "16384", "30720"]
+    Description: Fargate memory (MiB)
+  RegistryTableArn:
+    Type: String
+    Description: DynamoDB table ARN for the node registry
+  RegistryTableName:
+    Type: String
+    Description: DynamoDB table name for the node registry
+  LogRetentionDays:
+    Type: Number
+    Default: 14
+    AllowedValues: [1,3,5,7,14,30,60,90,120,150,180,365,400,545,731,1827,3653]
+    Description: CloudWatch Logs retention (days)
+
+Mappings: {}
+
+Resources:
+  ########################################
+  # CloudWatch Logs
+  ########################################
+  MediaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/ecs/${ProjectName}-${EnvironmentName}"
+      RetentionInDays: !Ref LogRetentionDays
+
+  ########################################
+  # IAM Roles
+  ########################################
+  ECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-${EnvironmentName}-ecs-exec"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: [ecs-tasks.amazonaws.com] }
+            Action: ["sts:AssumeRole"]
+      ManagedPolicyArns:
+        # Pull from ECR + write logs + X-Ray/SSM as needed
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-${EnvironmentName}-ecs-task"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: [ecs-tasks.amazonaws.com] }
+            Action: ["sts:AssumeRole"]
+      Policies:
+        - PolicyName: !Sub "${ProjectName}-${EnvironmentName}-task-dynamodb"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: DynamoDBRegistryRW
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource: !Ref RegistryTableArn
+        - PolicyName: !Sub "${ProjectName}-${EnvironmentName}-task-logs"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: CWLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "${MediaLogGroup.Arn}:*"
+
+  ########################################
+  # Security Group (Tasks)
+  ########################################
+  TaskSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "SG for ${ProjectName}-${EnvironmentName} ECS tasks"
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref ContainerPort
+          ToPort: !Ref ContainerPort
+          SourceSecurityGroupId: !Ref ALBSecurityGroupId
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          FromPort: 0
+          ToPort: 0
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-${EnvironmentName}-task-sg"
+
+  ########################################
+  # ECS Cluster
+  ########################################
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref ClusterName
+      CapacityProviders: []  # Fargate-only
+
+  ########################################
+  # Task Definition (Fargate)
+  ########################################
+  MediaTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${ProjectName}-${EnvironmentName}-task"
+      Cpu: !Ref CpuUnits
+      Memory: !Ref MemoryMiB
+      NetworkMode: awsvpc
+      RequiresCompatibilities: ["FARGATE"]
+      RuntimePlatform:
+        OperatingSystemFamily: LINUX
+        CpuArchitecture: X86_64
+      ExecutionRoleArn: !GetAtt ECSTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt ECSTaskRole.Arn
+      ContainerDefinitions:
+        - Name: media-node
+          Image: !Ref TaskImage
+          Essential: true
+          PortMappings:
+            - ContainerPort: !Ref ContainerPort
+              HostPort: !Ref ContainerPort
+              Protocol: tcp
+          Environment:
+            - Name: REGISTRY_TABLE
+              Value: !Ref RegistryTableName
+            - Name: STATUS_PORT
+              Value: !Ref ContainerPort
+            # Optionally set PATH_ASSIGNMENT via env var/SSM or injected from allocator
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref MediaLogGroup
+              awslogs-region: !Ref "AWS::Region"
+              awslogs-stream-prefix: !Sub "${ProjectName}-${EnvironmentName}"
+          Command:
+            - /bin/sh
+            - -c
+            - >
+              /app/register_on_start.sh && /app/start_media.sh
+
+  ########################################
+  # ECS Service (Fargate)
+  ########################################
+  MediaService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - MediaTaskDefinition
+    Properties:
+      ServiceName: !Sub "${ProjectName}-${EnvironmentName}-svc"
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref MediaTaskDefinition
+      DesiredCount: !Ref DesiredCount
+      LaunchType: FARGATE
+      PlatformVersion: "1.4.0"
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+        Alarms:
+          AlarmNames: []    # attach scale/health alarms separately if desired
+          Enable: false
+          Rollback: false
+      DeploymentController:
+        Type: ECS
+      EnableECSManagedTags: true
+      PropagateTags: SERVICE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups: [!Ref TaskSecurityGroup]
+          Subnets: !Ref PrivateSubnetIds
+      LoadBalancers:
+        - TargetGroupArn: !Ref TargetGroupArn
+          ContainerName: media-node
+          ContainerPort: !Ref ContainerPort
+      EnableExecuteCommand: false
+
+Outputs:
+  ClusterArn:
+    Description: ECS Cluster ARN
+    Value: !Ref ECSCluster
+  ServiceName:
+    Description: ECS Service Name
+    Value: !Ref MediaService
+  TaskDefinitionArn:
+    Description: Task Definition ARN
+    Value: !Ref MediaTaskDefinition
+  TaskSecurityGroupId:
+    Description: Security Group ID for ECS tasks
+    Value: !Ref TaskSecurityGroup
+  LogGroupName:
+    Description: CloudWatch Log Group
+    Value: !Ref MediaLogGroup
 
