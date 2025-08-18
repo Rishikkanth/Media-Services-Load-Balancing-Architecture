@@ -1,25 +1,19 @@
-# Admin Force Close Endpoint (`/admin/force-close`)
+# Media Services Load Balancing Architecture
 
-The **Admin Force Close** endpoint is used by the **Drain Controller** or an operator to gracefully close all active WebSocket sessions on a node when it is being decommissioned.  
-It ensures that long-lived connections do not block scale-in or shutdown operations.
-
----
-
-## Endpoint
-
-- **Method:** `POST`  
-- **Path:** `/admin/force-close`  
-- **Port:** `4001` (same as WebSocket server)  
-- **Authentication:** Must require a secure token (e.g., signed JWT or IAM-auth header).  
-- **Scope:** Accessible only inside the VPC; not exposed to the public internet.
+This repository contains the deliverables for the **DevOps Interview Assignment – Enhanced Media Services Load Balancing Architecture**.  
+It demonstrates how to design and implement an AWS-based infrastructure that routes **WebSocket traffic** to dynamically scaling media service nodes, while maintaining security, availability, and zero downtime.
 
 ---
 
-## Example Request
+## 🎯 Objectives
 
-```http
-POST /admin/force-close HTTP/1.1
-Host: media-node.internal:4001
-Authorization: Bearer <signed_token>
-Content-Type: application/json
+- Route long-lived **WebSocket connections** (`wss://media.example.com/media/X/ws/{session-id}`) to the correct ECS task.
+- Support **dynamic scaling** (1–10 nodes per shard).
+- Achieve **zero downtime** during deployments and scaling.
+- Provide **graceful connection draining** for WebSocket sessions.
+- Ensure all traffic is **encrypted (TLS/ACM)** and nodes run in **private subnets**.
+- Support **multiple environments** (Prod, Staging, Dev).
+
+---
+
 
